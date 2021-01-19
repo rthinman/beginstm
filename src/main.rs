@@ -14,9 +14,9 @@ use cortex_m_rt::entry;
 use cortex_m::{iprintln, Peripherals};
 //use cortex_m_semihosting::{hprintln};
 
-use f3::hal::stm32f30x::{self, gpioc, rcc, GPIOE, RCC};
+use f3::hal::stm32f30x::{self, gpioc, rcc, GPIOE, RCC, TIM6, tim6};
 
-fn init() -> GPIOE {
+fn init() -> (GPIOE, TIM6) {
     let dp = stm32f30x::Peripherals::take().unwrap(); // Device peripherals
 
     // Use the Reset Clock Control peripheral to enable port E (bit 21 on AHBENR).
@@ -30,8 +30,29 @@ fn init() -> GPIOE {
         w.moder9().output()
     });
 
+    // Use the RCC peripheral to enable timer 6.
+    dp.RCC.apb1enr.modify(|_, w| {
+        w.tim6en().set_bit()
+    });
+
+    // Set up common parameters for timer 6
+    // 8 MHz / (psc+1) = 1 kHz is the goal, thus 7999.
+    dp.TIM6.psc.write(|w| {
+        w.psc().bits(7999)
+    });
+
+    // OPM = one pulse mode, CEN = counter enable, and we want to keep it disabled for now.
+    dp.TIM6.cr1.write(|w| w.opm().set_bit().cen().clear_bit());
+
     // Return an owned GPIOE struct.  I think this also means that the rest of the device peripherals are inaccessible.
-    dp.GPIOE
+    (dp.GPIOE, dp.TIM6)
+}
+
+fn my_delay(timeinfo: &TIM6, ms: u16) {
+    timeinfo.arr.write(|w| w.arr().bits(ms)); // Set the auto reload value.
+    timeinfo.cr1.modify(|_, w| w.cen().set_bit()); // Enable timer.
+    while !timeinfo.sr.read().uif().bit_is_set() {} // Wait until update
+    timeinfo.sr.modify(|_, w| w.uif().clear_bit());  // Clear the flag for next time.
 }
 
 #[entry]
@@ -58,29 +79,45 @@ fn main() -> ! {
     // });
 
     // Alternate approach with initialization.
-    let gpioe = init(); // Returns an owned GPIOE.
+    let (gpioe, mytim6) = init(); // Returns an owned GPIOE.
 
 
-    gpioe.odr.write(|w| {
-        w.odr8().set_bit();
-        w.odr9().set_bit()
-    });
+    // gpioe.odr.write(|w| {
+    //     w.odr8().set_bit();
+    //     w.odr9().set_bit()
+    // });
 
-//    let rcc = unsafe {&*RCC::ptr()};
-//    rcc.ahbenr.modify(|_, w| {w.iopeen().set_bit()});
-    // let gpioe = unsafe { &*GPIOE::ptr()};
+    // Third approach using the HAL crate.  Taken from the f3 repo examples/blinky.rs.
+    // But it doesn't compile, as the various FLASH, RCC, GPIOE structs are from the peripheral access crate and don't have
+    // constrain or split methods.
+    // let dp = stm32f30x::Peripherals::take().unwrap(); // Device peripherals
+    // let mut flash = dp.FLASH.constrain();
+    // let mut rcc = dp.RCC.constrain();
+    // let mut gpioe = dp.GPIOE.split(&mut rcc.ahb);
+
 
     iprintln!(stim, "Hello, big world!");
-    // unsafe {
-    //     const GPIO_BSRR: u32 = 0x48001018;
-    //     *(GPIO_BSRR as *mut u32) = 1 << 25;
-    // }
-//    hprintln!("Hello, whacky world!").unwrap(); // This if we are using semihosting.
 
-    let mut x = 0;
+//    let mut x = 0;
+    let ms = 500;
     loop {
         // your code goes here
-        x += 1;
-        iprintln!(stim, "x is {}", x);
+        // x += 1;
+        // iprintln!(stim, "x is {}", x);
+        
+        gpioe.odr.write(|w| {
+            w.odr8().set_bit();
+            w.odr9().set_bit()
+        });
+
+        my_delay(&mytim6, ms);
+
+        gpioe.odr.write(|w| {
+            w.odr8().clear_bit();
+            w.odr9().clear_bit()
+        });
+
+        my_delay(&mytim6, ms);
+
     }
 }
