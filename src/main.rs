@@ -9,51 +9,56 @@ use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch
 // use panic_itm as _; // logs messages over ITM; requires ITM support
 // use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
 
+use stm32f3xx_hal as hal;
+
 #[allow(unused_imports)]
 use cortex_m_rt::entry;
 use cortex_m::{iprintln, Peripherals};
 //use cortex_m_semihosting::{hprintln};
 
-use f3::hal::stm32f30x::{self, gpioc, rcc, GPIOE, RCC, TIM6, tim6};
+use hal::pac;
+use hal::prelude::*;
 
-fn init() -> (GPIOE, TIM6) {
-    let dp = stm32f30x::Peripherals::take().unwrap(); // Device peripherals
+//use f3::hal::stm32f30x::{self, gpioc, rcc, GPIOE, RCC, TIM6, tim6};
 
-    // Use the Reset Clock Control peripheral to enable port E (bit 21 on AHBENR).
-    dp.RCC.ahbenr.modify(|_, w| {
-        w.iopeen().set_bit()
-    });
+// fn init() -> (GPIOE, TIM6) {
+//     let dp = stm32f30x::Peripherals::take().unwrap(); // Device peripherals
 
-    // Make thees port E pins outputs.
-    dp.GPIOE.moder.modify(|_, w| {
-        w.moder8().output();
-        w.moder9().output()
-    });
+//     // Use the Reset Clock Control peripheral to enable port E (bit 21 on AHBENR).
+//     dp.RCC.ahbenr.modify(|_, w| {
+//         w.iopeen().set_bit()
+//     });
 
-    // Use the RCC peripheral to enable timer 6.
-    dp.RCC.apb1enr.modify(|_, w| {
-        w.tim6en().set_bit()
-    });
+//     // Make thees port E pins outputs.
+//     dp.GPIOE.moder.modify(|_, w| {
+//         w.moder8().output();
+//         w.moder9().output()
+//     });
 
-    // Set up common parameters for timer 6
-    // 8 MHz / (psc+1) = 1 kHz is the goal, thus 7999.
-    dp.TIM6.psc.write(|w| {
-        w.psc().bits(7999)
-    });
+//     // Use the RCC peripheral to enable timer 6.
+//     dp.RCC.apb1enr.modify(|_, w| {
+//         w.tim6en().set_bit()
+//     });
 
-    // OPM = one pulse mode, CEN = counter enable, and we want to keep it disabled for now.
-    dp.TIM6.cr1.write(|w| w.opm().set_bit().cen().clear_bit());
+//     // Set up common parameters for timer 6
+//     // 8 MHz / (psc+1) = 1 kHz is the goal, thus 7999.
+//     dp.TIM6.psc.write(|w| {
+//         w.psc().bits(7999)
+//     });
 
-    // Return an owned GPIOE struct.  I think this also means that the rest of the device peripherals are inaccessible.
-    (dp.GPIOE, dp.TIM6)
-}
+//     // OPM = one pulse mode, CEN = counter enable, and we want to keep it disabled for now.
+//     dp.TIM6.cr1.write(|w| w.opm().set_bit().cen().clear_bit());
 
-fn my_delay(timeinfo: &TIM6, ms: u16) {
-    timeinfo.arr.write(|w| w.arr().bits(ms)); // Set the auto reload value.
-    timeinfo.cr1.modify(|_, w| w.cen().set_bit()); // Enable timer.
-    while !timeinfo.sr.read().uif().bit_is_set() {} // Wait until update
-    timeinfo.sr.modify(|_, w| w.uif().clear_bit());  // Clear the flag for next time.
-}
+//     // Return an owned GPIOE struct.  I think this also means that the rest of the device peripherals are inaccessible.
+//     (dp.GPIOE, dp.TIM6)
+// }
+
+// fn my_delay(timeinfo: &TIM6, ms: u16) {
+//     timeinfo.arr.write(|w| w.arr().bits(ms)); // Set the auto reload value.
+//     timeinfo.cr1.modify(|_, w| w.cen().set_bit()); // Enable timer.
+//     while !timeinfo.sr.read().uif().bit_is_set() {} // Wait until update
+//     timeinfo.sr.modify(|_, w| w.uif().clear_bit());  // Clear the flag for next time.
+// }
 
 #[entry]
 fn main() -> ! {
@@ -61,6 +66,30 @@ fn main() -> ! {
     // See the "itm.rs" example.
     let mut p = Peripherals::take().unwrap();  // Cortex core peripherals
     let stim = &mut p.ITM.stim[0];
+
+    let dp = pac::Peripherals::take().unwrap(); // Device peripherals
+
+    let mut rcc = dp.RCC.constrain();
+    let mut gpioe = dp.GPIOE.split(&mut rcc.ahb);
+
+    let mut led = gpioe.pe13.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
+
+    led.set_low().unwrap();
+
+    iprintln!(stim, "Hello, big world!");
+
+    loop {
+        led.toggle().unwrap();
+        cortex_m::asm::delay(8_000_000);
+        // Toggle by hand
+        // Uses `StatefulOutputPin` instead of `ToggleableOutputPin`.
+        if led.is_set_low().unwrap() {
+            led.set_high().unwrap();
+        } else {
+            led.set_low().unwrap();
+        }
+        cortex_m::asm::delay(8_000_000);
+    }
 
     // This approach works, where the device peripheral is owned by main().
     // Commented out to try to write an initialization function.
@@ -79,7 +108,7 @@ fn main() -> ! {
     // });
 
     // Alternate approach with initialization.
-    let (gpioe, mytim6) = init(); // Returns an owned GPIOE.
+    // let (gpioe, mytim6) = init(); // Returns an owned GPIOE.
 
 
     // gpioe.odr.write(|w| {
@@ -96,28 +125,27 @@ fn main() -> ! {
     // let mut gpioe = dp.GPIOE.split(&mut rcc.ahb);
 
 
-    iprintln!(stim, "Hello, big world!");
 
 //    let mut x = 0;
-    let ms = 500;
-    loop {
-        // your code goes here
-        // x += 1;
-        // iprintln!(stim, "x is {}", x);
+    // let ms = 500;
+    // loop {
+    //     // your code goes here
+    //     // x += 1;
+    //     // iprintln!(stim, "x is {}", x);
         
-        gpioe.odr.write(|w| {
-            w.odr8().set_bit();
-            w.odr9().set_bit()
-        });
+    //     gpioe.odr.write(|w| {
+    //         w.odr8().set_bit();
+    //         w.odr9().set_bit()
+    //     });
 
-        my_delay(&mytim6, ms);
+    //     my_delay(&mytim6, ms);
 
-        gpioe.odr.write(|w| {
-            w.odr8().clear_bit();
-            w.odr9().clear_bit()
-        });
+    //     gpioe.odr.write(|w| {
+    //         w.odr8().clear_bit();
+    //         w.odr9().clear_bit()
+    //     });
 
-        my_delay(&mytim6, ms);
+    //     my_delay(&mytim6, ms);
 
-    }
+    // }
 }
