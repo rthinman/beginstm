@@ -12,6 +12,7 @@ cortex-m-semihosting = "0.3.3"
 panic-halt = "0.2.0" 
 #f3 = "0.6.1" # f3 for the Discovery book, but, wouldn't compile with HAL 
 #stm32f3xx-hal = "0.6.1"  # Can't use this directly, as need to specify feature, see below.
+nb = "1.0.0" # Used for nonblocking I/O.
 
 [dependencies.stm32f3xx-hal]
 version = "0.6.1"
