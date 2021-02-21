@@ -16,7 +16,7 @@ nb = "1.0.0" # Used for nonblocking I/O.
 
 [dependencies.stm32f3xx-hal]
 version = "0.6.1"
-features = ["stm32f303xc"]
+features = ["stm32f303xc", "rt"]
 
 # Uncomment for the panic example.
 # panic-itm = "0.4.1"

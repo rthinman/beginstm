@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-#![deny(unsafe_code)]
+//#![deny(unsafe_code)]
 
 
 // pick a panicking behavior
@@ -10,8 +10,11 @@ use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch
 // use panic_semihosting as _; // logs messages to the host stderr; requires a debugger
 
 #[allow(unused_imports)]
+use core::cell::RefCell;
+use core::ops::DerefMut;
+
 use cortex_m_rt::entry;
-use cortex_m::{iprintln, Peripherals};
+use cortex_m::{iprintln, Peripherals, interrupt::{free, Mutex}};
 //use cortex_m_semihosting::{hprintln};
 
 use nb::block;  // Needed for the block! macro.
@@ -21,17 +24,28 @@ use stm32f3xx_hal as hal;
 use hal::pac;
 use hal::prelude::*;
 use hal::pwm::tim1;
-use hal::timer::Timer;
+use hal::timer::{Timer, Event};
 use hal::delay::Delay;
-//use hal::timer::Timer::tim3;
+use hal::stm32;
+use stm32::{interrupt, Interrupt};
+//use hal::pac::interrupt; // interrupt available from either pac or stm32.  Requires "rt" feature of the crate.
 
-// The following imports are in the PWM example, but are not necessary.
-//use hal::hal::PwmPin;
-//use hal::flash::FlashExt;
-//use hal::gpio::GpioExt;
-//use hal::rcc::RccExt;
-//use hal::time::U32Ext;
+// Static variables.
+static TIM: Mutex<RefCell<Option<Timer<stm32::TIM7>>>> = Mutex::new(RefCell::new(None));
+static LED: Mutex<RefCell<Option<hal::gpio::PXx<hal::gpio::Output<hal::gpio::PushPull>>>>> = Mutex::new(RefCell::new(None));
 
+#[interrupt]
+// Timer toggles the LED.
+fn TIM7() {
+    free(|cs| {
+        if let Some(ref mut tim7) = TIM.borrow(cs).borrow_mut().deref_mut() {
+            tim7.clear_update_interrupt_flag()
+        }
+        if let Some(ref mut led) = LED.borrow(cs).borrow_mut().deref_mut() {
+            led.toggle().unwrap()
+        }
+    });
+}
 
 #[entry]
 fn main() -> ! {
@@ -46,38 +60,48 @@ fn main() -> ! {
     let mut rcc = dp.RCC.constrain();
     let clocks = rcc.cfgr.sysclk(8.mhz()).freeze(&mut flash.acr); // Configure clocks and freeze them.  Need 8 MHz for ITM?.
 
+    // Set up timer 7 for an interrupt.
+    // Hertz value is the rate of interrupt firing.
+    let mut atimer = Timer::tim7(dp.TIM7, 5.hz(), clocks, &mut rcc.apb1);
+    atimer.listen(Event::Update);  // Listen for the update event
+    // Move the timer into the static Mutex that is accessed by the interrupt.
+    free(|cs| {
+        TIM.borrow(cs).replace(Some(atimer));
+    });
+
     // Delay struct using the SYSTICK that I can use for blocking delays.
     let mut mydelay = Delay::new(p.SYST, clocks);
 
-    // Configure pins
-    // We aren't using the port A or B pins in this example.
-    let mut gpioa = dp.GPIOA.split(&mut rcc.ahb);
-//    let pa4 = gpioa.pa4.into_af2(&mut gpioa.moder, &mut gpioa.afrl);
-    let _pa6 = gpioa.pa6.into_af2(&mut gpioa.moder, &mut gpioa.afrl);
-//    let pa7 = gpioa.pa7.into_af2(&mut gpioa.moder, &mut gpioa.afrl);
-
-    let mut gpiob = dp.GPIOB.split(&mut rcc.ahb);
-    let _pb0 = gpiob.pb0.into_af2(&mut gpiob.moder, &mut gpiob.afrl);
-//    let pb1 = gpiob.pb1.into_af2(&mut gpiob.moder, &mut gpiob.afrl);
-    let _pb4 = gpiob.pb4.into_af2(&mut gpiob.moder, &mut gpiob.afrl);
-
+    // Configure pins on port E, where the board's LEDs are.
     let mut gpioe = dp.GPIOE.split(&mut rcc.ahb);
     // output for TIM1
     // PE9 is the red "North" LED.
     // PE11 is the green "East" LED.
- //   let pe8 = gpioe.pe8.into_af2(&mut gpioe.moder, &mut gpioe.afrh);
     let pe9 = gpioe.pe9.into_af2(&mut gpioe.moder, &mut gpioe.afrh);
     let pe11 = gpioe.pe11.into_af2(&mut gpioe.moder, &mut gpioe.afrh);
     // regular push-pull output PE13 is the red "South" LED.
-    let mut led = gpioe.pe13.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
-
-    led.set_low().unwrap();
+    let mut led = gpioe.pe13.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper).downgrade().downgrade();
 
     // Configure TIM3, one of the general-purpose timers.
     // This is part of the Timer struct and timer module.
     // It can be used for blocking/nonblocking delays via the nb crate.
     let mut mytim3 = Timer::tim3(dp.TIM3, 1000.hz(), clocks, &mut rcc.apb1);
 
+    // Flash the LED manually to show how to use delays.
+    led.set_high().unwrap();
+    mydelay.delay_ms(1000u16); // Using the HAL delay struct and SYSTICK.
+    led.set_low().unwrap();
+    mytim3.start(10.hz()); // 0.1 second delay.  The weird thing is that https://docs.rs/stm32f3xx-hal/0.6.1/stm32f3xx_hal/prelude/trait._embedded_hal_timer_CountDown.html
+                           // says it wants a time, but instead it wants a Hertz struct.
+    block!(mytim3.wait()).unwrap();  // Block until the timer times out.
+    led.set_high().unwrap();
+    cortex_m::asm::delay(8_000_000); // Cortex delay for 8M cycles = 1 sec.
+
+    // Now that we have played around with the led, move it into the static so the interrupt can use it.
+    // If just doing this and not manually toggling as above, "led" does not need to be defined as mutable.  
+    free(|cs| {
+        LED.borrow(cs).replace(Some(led));
+    });
 
     // Configure TIM1, an advanced timer with complementary pins that drive 
     // the LEDs on the discovery board.  Unfortunately, presently one can use only regular
@@ -100,23 +124,13 @@ fn main() -> ! {
 
     iprintln!(stim, "Hello, big world!");
 
-    // Loop, flashing the South LED manually.
+    unsafe {
+        stm32::NVIC::unmask(Interrupt::TIM7);
+    }
+
+    // Loop, flashing the South LED manually if first line is uncommented and led is not moved to LED, or inside the interrupt otherwise.
     loop {
-        led.toggle().unwrap();
-//        cortex_m::asm::delay(8_000_000);
-        mydelay.delay_ms(1000u16);
-        // Toggle by hand
-        // Uses `StatefulOutputPin` instead of `ToggleableOutputPin`.
-        if led.is_set_low().unwrap() {
-            led.set_high().unwrap();
-        } else {
-            led.set_low().unwrap();
-        }
-        // Three different ways of delaying.
-//        cortex_m::asm::delay(8_000_000);
-//        mydelay.delay_ms(1000u16);
-        mytim3.start(10.hz()); // 0.1 second delay.  The weird thing is that https://docs.rs/stm32f3xx-hal/0.6.1/stm32f3xx_hal/prelude/trait._embedded_hal_timer_CountDown.html
-                               // says it wants a time, but instead it wants a Hertz struct.
-        block!(mytim3.wait()).unwrap();  // Block until the timer times out.
+//        led.toggle().unwrap();
+        cortex_m::asm::wfi();     // Wait for interrupt.
     }
 }
