@@ -12,6 +12,7 @@ use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch
 #[allow(unused_imports)]
 use core::cell::RefCell;
 use core::ops::DerefMut;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use cortex_m_rt::entry;
 use cortex_m::{iprintln, Peripherals, interrupt::{free, Mutex}};
@@ -33,6 +34,7 @@ use stm32::{interrupt, Interrupt};
 // Static variables.
 static TIM: Mutex<RefCell<Option<Timer<stm32::TIM7>>>> = Mutex::new(RefCell::new(None));
 static LED: Mutex<RefCell<Option<hal::gpio::PXx<hal::gpio::Output<hal::gpio::PushPull>>>>> = Mutex::new(RefCell::new(None));
+static USER_BUTTON_PRESSED: AtomicBool = AtomicBool::new(false);
 
 #[interrupt]
 // Timer toggles the LED.
@@ -45,6 +47,19 @@ fn TIM7() {
             led.toggle().unwrap()
         }
     });
+}
+
+#[interrupt]
+// In the stm32f3-discovery board crate, this is abstracted to a button module or crate.
+fn EXTI0() {
+    // Clear the interrupt request so it won't fire again before another press.
+    unsafe { 
+        let exti = &(*stm32f3xx_hal::stm32::EXTI::ptr());
+        exti.pr1.write(|w| w.pr0().set_bit())
+    }
+    // PA0 has a low-pass filter, so don't need to debounce in software.
+    // Relaxed means only this operation is atomic, no constraints on other operations.
+    USER_BUTTON_PRESSED.store(true, Ordering::Relaxed);
 }
 
 #[entry]
@@ -71,6 +86,15 @@ fn main() -> ! {
 
     // Delay struct using the SYSTICK that I can use for blocking delays.
     let mut mydelay = Delay::new(p.SYST, clocks);
+
+    // Configure pins on port A, where the user button is. (For polling.)
+    // let mut gpioa = dp.GPIOA.split(&mut rcc.ahb);
+    // let user_button = gpioa.pa0.into_floating_input(&mut gpioa.moder, &mut gpioa.pupdr);
+    // Alternately, configure PA0 as an external interrupt source.
+    dp.EXTI.imr1.modify(|_, w| w.mr0().set_bit()); // External interrupt peripheral, interrupt mask register 1, bit zero for PA0.
+    dp.SYSCFG.exticr1.modify(|_, w| unsafe { w.exti0().bits(0x00)}); // Connect PA0 to the EXTI0 interrupt line.
+    dp.EXTI.rtsr1.modify(|_, w| w.tr0().set_bit());                  // Set the rising edge trigger for bit0 = PA0.
+    // External interrupt is enabled below before the loop.
 
     // Configure pins on port E, where the board's LEDs are.
     let mut gpioe = dp.GPIOE.split(&mut rcc.ahb);
@@ -124,13 +148,38 @@ fn main() -> ! {
 
     iprintln!(stim, "Hello, big world!");
 
+    // Enable interrupts.
     unsafe {
         stm32::NVIC::unmask(Interrupt::TIM7);
+        stm32::NVIC::unmask(Interrupt::EXTI0);
     }
 
     // Loop, flashing the South LED manually if first line is uncommented and led is not moved to LED, or inside the interrupt otherwise.
     loop {
 //        led.toggle().unwrap();
+        // Check button once per interrupt.  Note that is_high() returns a result.
+        // match user_button.is_high() {
+        //     Ok(true) => {
+        //         iprintln!(stim, "Button pressed");
+        //     }
+        //     Ok(false) => {
+        //         ()
+        //     }
+        //     Err(_) => {
+        //         iprintln!(stim, "Error from button call");
+        //     }
+        // }
+        // Alternate form if we don't want to print anything about the error.
+        // if let Ok(true) = user_button.is_high() {
+        //     iprintln!(stim, "Button pressed");
+        // }
+
+        if USER_BUTTON_PRESSED.swap(false, Ordering::AcqRel) {
+            // swap() stores the false and returns the previous value.
+            // AcqRel ordering: all writes in other threads are visible before the modification of the swap.
+            iprintln!(stim, "Button pressed");
+        }
+
         cortex_m::asm::wfi();     // Wait for interrupt.
     }
 }
