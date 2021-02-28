@@ -13,6 +13,8 @@ panic-halt = "0.2.0"
 #f3 = "0.6.1" # f3 for the Discovery book, but, wouldn't compile with HAL 
 #stm32f3xx-hal = "0.6.1"  # Can't use this directly, as need to specify feature, see below.
 nb = "1.0.0" # Used for nonblocking I/O.
+#lsm303dlhc = "0.2.0" # Accel/mag sensor driver used by stm32f3-discovery crate, but geared for LSM303D
+lsm303agr = "0.1.0"   # Accel/mag sensor driver for LSM303AGR, on newer boards
 
 [dependencies.stm32f3xx-hal]
 version = "0.6.1"

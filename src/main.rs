@@ -12,10 +12,11 @@ use panic_halt as _; // you can put a breakpoint on `rust_begin_unwind` to catch
 #[allow(unused_imports)]
 use core::cell::RefCell;
 use core::ops::DerefMut;
+use core::ops::Range;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use cortex_m_rt::entry;
-use cortex_m::{iprintln, Peripherals, interrupt::{free, Mutex}};
+use cortex_m::{iprintln, iprint, Peripherals, interrupt::{free, Mutex}};
 //use cortex_m_semihosting::{hprintln};
 
 use nb::block;  // Needed for the block! macro.
@@ -30,6 +31,9 @@ use hal::delay::Delay;
 use hal::stm32;
 use stm32::{interrupt, Interrupt};
 //use hal::pac::interrupt; // interrupt available from either pac or stm32.  Requires "rt" feature of the crate.
+
+// Constants
+const VALID_ADDR_RANGE: Range<u8> = 0x08..0x78;
 
 // Static variables.
 static TIM: Mutex<RefCell<Option<Timer<stm32::TIM7>>>> = Mutex::new(RefCell::new(None));
@@ -77,7 +81,7 @@ fn main() -> ! {
 
     // Set up timer 7 for an interrupt.
     // Hertz value is the rate of interrupt firing.
-    let mut atimer = Timer::tim7(dp.TIM7, 5.hz(), clocks, &mut rcc.apb1);
+    let mut atimer = Timer::tim7(dp.TIM7, 1.hz(), clocks, &mut rcc.apb1);
     atimer.listen(Event::Update);  // Listen for the update event
     // Move the timer into the static Mutex that is accessed by the interrupt.
     free(|cs| {
@@ -94,7 +98,15 @@ fn main() -> ! {
     dp.EXTI.imr1.modify(|_, w| w.mr0().set_bit()); // External interrupt peripheral, interrupt mask register 1, bit zero for PA0.
     dp.SYSCFG.exticr1.modify(|_, w| unsafe { w.exti0().bits(0x00)}); // Connect PA0 to the EXTI0 interrupt line.
     dp.EXTI.rtsr1.modify(|_, w| w.tr0().set_bit());                  // Set the rising edge trigger for bit0 = PA0.
-    // External interrupt is enabled below before the loop.
+    // External interrupt is enabled below before the infinite loop.
+
+    // Configure pins on port B, where the I2C peripheral is, then scan ports right before the infinite loop.
+    let mut gpiob = dp.GPIOB.split(&mut rcc.ahb);
+    let i2c_pins = (
+        gpiob.pb6.into_af4(&mut gpiob.moder, &mut gpiob.afrl), // SCL
+        gpiob.pb7.into_af4(&mut gpiob.moder, &mut gpiob.afrl), // SDA
+    );
+    let mut my_i2c = hal::i2c::I2c::new(dp.I2C1, i2c_pins, 100.khz(), clocks, &mut rcc.apb1);
 
     // Configure pins on port E, where the board's LEDs are.
     let mut gpioe = dp.GPIOE.split(&mut rcc.ahb);
@@ -148,6 +160,25 @@ fn main() -> ! {
 
     iprintln!(stim, "Hello, big world!");
 
+    // I2C address scan.
+    for addr in 0x00_u8..0x80_u8 {
+//    for addr in VALID_ADDR_RANGE {
+            // Write the empty array and check the external device response.
+            if VALID_ADDR_RANGE.contains(&addr) && my_i2c.write(addr, &[]).is_ok(){
+//            if i2c.write(addr, &[]).is_ok(){
+            iprint!(stim, "{:02x} ", addr);
+        } else {
+            iprint!(stim, ".. ");
+        }
+        if addr % 0x10 == 0x0F {
+            iprintln!(stim, " ");
+        }
+    }
+
+//    let mut accel_mag = Lsm303::new(my_i2c).unwrap();
+    let mut accel_mag = lsm303agr::Lsm303agr::new_with_i2c(my_i2c);
+    accel_mag.init();
+
     // Enable interrupts.
     unsafe {
         stm32::NVIC::unmask(Interrupt::TIM7);
@@ -179,6 +210,10 @@ fn main() -> ! {
             // AcqRel ordering: all writes in other threads are visible before the modification of the swap.
             iprintln!(stim, "Button pressed");
         }
+
+        // Read accel data.
+        let data_a = accel_mag.accel_data(); //.unwrap(); // Ideally, handle the error case instead of unwrapping.
+        iprintln!(stim, "Accel {:?}", data_a);
 
         cortex_m::asm::wfi();     // Wait for interrupt.
     }
